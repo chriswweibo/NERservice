@@ -17,6 +17,7 @@ library(data.table)
 library(dplyr)
 library(lubridate)
 library(rbokeh)
+
 options(shiny.maxRequestSize=50*1024^2)
 # Define server logic required to draw a histogram
 shinyServer(function(input, output) {
@@ -75,7 +76,7 @@ shinyServer(function(input, output) {
       result=vocab[term_count<rateD()*candCount & sapply(term,grepl,candTerm)==T,,] 
       vocab=vocab[is.element(term,result$term)==F,,]
       vocab_compressed=c(vocab_compressed,result$term[1])
-      incProgress(0.1, detail = paste("finishing", round(1-(nrow(vocab)/vocabORI),digits = 3)*100,"%"))
+      incProgress(0.1, detail = paste("finishing", round(1-(nrow(vocab)/vocabORI),digits = 2)*100,"%"))
       setTxtProgressBar(txtProgressBar(min=0,max=1,style = 3),value =1-(nrow(vocab)/vocabORI))
       print(result$term[1])
     }
@@ -99,7 +100,7 @@ shinyServer(function(input, output) {
       else {
         vocabp_deleted=vocabp_deleted}
       vocab_cand=vocab_cand[-1,]
-      incProgress(0.1, detail = paste("finishing", round(1-(nrow(vocab_cand)/vocabpORI),digits = 3)*100,"%"))
+      incProgress(0.1, detail = paste("finishing", round(1-(nrow(vocab_cand)/vocabpORI),digits = 2)*100,"%"))
       setTxtProgressBar(txtProgressBar(min=0,max=1,style = 3),value =1-(nrow(vocab_cand)/vocabpORI))
       print(candTerm)
     }
@@ -110,31 +111,44 @@ shinyServer(function(input, output) {
       
       if (length(cand)==0) {return(0)}
       else {
-        table=data.frame(cand,score=rep(0,length(cand)),stringsAsFactors = F)
+        table=data.frame(cand,PMI=rep(0,length(cand)),MD=rep(0,length(cand)),LFMD=rep(0,length(cand)),stringsAsFactors = F)
         for ( i in 1 : length(cand)){
           spl=str_split(x,cand[i])[[1]] %>% str_replace_all("^_|_$","")
           spl=spl[nchar(spl)!=0]
-          table[i,2]=vocabp$prob[vocabp$term==x]/prod(vocabp$prob[vocabp$term==spl],vocabp$prob[vocabp$term==cand[i]])
+          denominater=prod(vocabp$prob[vocabp$term==spl],vocabp$prob[vocabp$term==cand[i]])
+          nominater=vocabp$prob[vocabp$term==x]
+          table[i,2]=-log2(nominater/denominater)
+          table[i,3]=-log2(nominater^2/denominater)
+          table[i,4]=-log2(nominater^3/denominater)
+          #table[i,2]=vocabp$prob[vocabp$term==x]/prod(vocabp$prob[vocabp$term==spl],vocabp$prob[vocabp$term==cand[i]])
         }
         
-        return(min(table$score))
+        return(c(min(table$PMI),min(table$MD),min(table$LFMD)))
       }
     }
     
     
-    vocabp$score=rep(0,nrow(vocabp))
+    vocabp$PMI=rep(0,nrow(vocabp))
+    vocabp$MD=rep(0,nrow(vocabp))
+    vocabp$LFMD=rep(0,nrow(vocabp))
     
-    withProgress(min=0, max=1, detail = "finishing", value = 1, message = "计算互信息",expr={
+    withProgress(min=0, max=1, detail = "finishing", value = 1, message = "计算PMI,MD,LFMD",expr={
     for ( i in 1:nrow(vocabp) ){
-      vocabp$score[i]=mutualInfo(vocabp$term[i])
-      incProgress(0.1, detail = paste("finishing", round(i/nrow(vocabp),digits = 3)*100,"%"))
+      result=mutualInfo(vocabp$term[i])
+      vocabp$PMI[i]=result[1]
+      vocabp$MD[i]=result[2]
+      vocabp$LFMD[i]=result[3]
+      
+      incProgress(0.1, detail = paste("finishing", round(i/nrow(vocabp),digits = 2)*100,"%"))
       setTxtProgressBar(txtProgressBar(min=0,max=1,style = 3),value =i/nrow(vocabp))
     }
       
       vocabp$term=str_replace_all(vocabp$term,pattern = "_",replacement = "")
       vocabp$length=sapply(vocabp$term,nchar)
-      vocabp$prob=round(vocabp$prob,digits = 4)
-      vocabp$score=round(vocabp$score,digits = 4)
+      vocabp$prob=round(vocabp$prob,digits = 2)
+      vocabp$PMI=round(vocabp$PMI,digits = 2)
+      vocabp$MD=round(vocabp$MD,digits = 2)
+      vocabp$LFMD=round(vocabp$LFMD,digits = 2)
       vocabp[order(-term_count),]
     })
     
@@ -145,7 +159,7 @@ shinyServer(function(input, output) {
    filtered=reactive({
      nb=paste("^",input$notBegin,sep="")
      ne=paste(input$notEnd,"$",sep="")
-     subset(final(),((term_count>input$vocPrune4 & doc_count>input$vocPrune4) | (score>input$vocPrune3 & term_count>2))) %>%
+     subset(final(),((term_count>input$vocPrune4 & doc_count>input$vocPrune4) | (PMI>input$vocPrune3 & term_count>2 & MD>input$vocMD & LFMD>input$vocLFMD))) %>%
        subset(grepl(nb,term)==F)%>%
        subset(grepl(ne,term)==F)%>%
        subset(grepl(input$notContain,term)==F)
@@ -155,7 +169,7 @@ shinyServer(function(input, output) {
      voc=voc()
      voc$term=str_replace_all(voc$term,pattern = "_",replacement = "")
      voc$length=sapply(voc$term,nchar)
-     voc$prob=round(voc$prob,digits = 4)
+     voc$prob=round(voc$prob,digits = 2)
      voc[order(-term_count),]
      
    })
@@ -205,8 +219,10 @@ shinyServer(function(input, output) {
    
    output$scoreFiltered=renderRbokeh({
     
-     h <- figure(width = 600, height = 400) %>%
-       ly_boxplot(x=length,y=score, data = filtered()) 
+     h <- figure(width = 900, height = 400,ylab = "PMI(绿)MD(紫)LFMD(红)") %>%
+       ly_boxplot(x=length,y=PMI, data = filtered(),color="green") %>%
+       ly_boxplot(x=length,y=MD, data = filtered(),color="indigo") %>%
+       ly_boxplot(x=length,y=LFMD, data = filtered(),color="red") 
      h
    })
    
@@ -215,7 +231,7 @@ shinyServer(function(input, output) {
      
      lc=count(filtered(),length)
      
-     h <- figure(width = 600, height = 400) %>%
+     h <- figure(width = 900, height = 400) %>%
        ly_points(length, n,data = lc) 
      h
    })
